@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,5 +48,22 @@ func TestBotHandlesChallengesAndDeduplicatesGames(t *testing.T) {
 	}
 	if api.streams != 1 {
 		t.Errorf("game streams opened = %d, want 1", api.streams)
+	}
+}
+
+func TestBotRefusesNonBotAccount(t *testing.T) {
+	api := newFakeAPI()
+	api.notBot = true
+	ok := lichess.Challenge{ID: "ok", Variant: lichess.Variant{Key: "standard"},
+		TimeControl: lichess.TimeControl{Type: "clock", Limit: 600}, Challenger: lichess.User{ID: "bob"}}
+	api.events = []lichess.Event{{Type: "challenge", Challenge: &ok}}
+	b := &Bot{API: api, Brain: &Brain{LLM: &fakeLLM{}, Log: discardLogger()}, Config: config.Default(), Log: discardLogger()}
+
+	err := b.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not a BOT account") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(api.accepted) != 0 {
+		t.Fatalf("a challenge was accepted with a non-BOT account: %v", api.accepted)
 	}
 }

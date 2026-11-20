@@ -32,15 +32,30 @@ The preliminary analysis (API, architecture, difficulties, risks) is in
 
 ### Create the BOT account
 
-1. Create the account, then a personal token with the `bot:play` scope:
-   <https://lichess.org/account/oauth/token/create?scopes[]=bot:play>.
-2. Upgrade the account to BOT. This is **irreversible**:
+1. Create the Lichess account. **Do not play any game with it**: an account
+   that has played a game can no longer become a BOT.
+2. Create a personal API token with this link, which preselects the right
+   scope:
+   <https://lichess.org/account/oauth/token/create?scopes[]=bot:play&description=llm-chess-bot>.
+   Only one box is needed, **"Play games with the bot API"** (`bot:play`). It
+   covers the upgrade, the event stream, challenges, moves and chat. Leave the
+   other boxes unchecked.
+3. Copy the token (it starts with `lip_`) into `.env` as
+   `LICHESS_TOKEN=lip_...` (create the file with `cp .env.example .env`).
+   Lichess shows the token only once.
+4. Upgrade the account to BOT. This is **irreversible**:
 
    ```sh
+   source .env
    curl -d '' https://lichess.org/api/bot/account/upgrade -H "Authorization: Bearer $LICHESS_TOKEN"
    ```
 
-At startup, the bot logs a warning if the account does not have the `BOT` title.
+   The expected answer is `{"ok":true}`.
+5. Check the result with `mise run check` (see below): it must show
+   `title "BOT"`.
+
+The bot refuses to start if the account does not have the `BOT` title, so it
+never accepts a challenge it could not play.
 
 ## Quick start with mise
 

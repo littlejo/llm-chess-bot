@@ -116,6 +116,12 @@ func (s *Session) Run(ctx context.Context) {
 	go func() {
 		streamDone <- lichess.Reconnect(ctx, s.log, "game", true, func(ctx context.Context) error {
 			err := s.api.StreamGame(ctx, s.id, func(ev lichess.GameEvent) {
+				// Mark the end here, not in the Run loop: Lichess closes the
+				// stream right after the final state, possibly before the
+				// loop has processed it.
+				if isFinal(ev) {
+					s.ended.Store(true)
+				}
 				select {
 				case s.events <- ev:
 				case <-ctx.Done():
@@ -151,6 +157,12 @@ func (s *Session) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// isFinal reports whether ev carries a terminal game status.
+func isFinal(ev lichess.GameEvent) bool {
+	return (ev.State != nil && lichess.Finished(ev.State.Status)) ||
+		(ev.Full != nil && lichess.Finished(ev.Full.State.Status))
 }
 
 func (s *Session) handleEvent(ctx context.Context, ev lichess.GameEvent) {

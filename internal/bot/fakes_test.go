@@ -29,6 +29,7 @@ type fakeAPI struct {
 	declined  map[string]string
 	streams   int
 	moveErr   error
+	notBot    bool
 }
 
 func newFakeAPI() *fakeAPI {
@@ -36,6 +37,9 @@ func newFakeAPI() *fakeAPI {
 }
 
 func (f *fakeAPI) Account(context.Context) (lichess.Account, error) {
+	if f.notBot {
+		return lichess.Account{ID: "llmbot", Username: "LLMBot"}, nil
+	}
 	return lichess.Account{ID: "llmbot", Username: "LLMBot", Title: "BOT"}, nil
 }
 

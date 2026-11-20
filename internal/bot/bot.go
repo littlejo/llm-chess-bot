@@ -4,6 +4,7 @@ package bot
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -33,8 +34,11 @@ func (b *Bot) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Without the BOT title, the Bot API rejects game streams and moves, so
+	// accepting a challenge would only create a game the bot cannot play,
+	// and a game played makes the account impossible to upgrade.
 	if acct.Title != "BOT" {
-		b.Log.Warn("this account is not a BOT account: upgrade it with POST /api/bot/account/upgrade (see README)", "account", acct.Username)
+		return fmt.Errorf("account %q is not a BOT account: upgrade it first with POST /api/bot/account/upgrade (see README)", acct.Username)
 	}
 	b.me = strings.ToLower(acct.ID)
 	b.games = map[string]context.CancelFunc{}

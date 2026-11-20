@@ -269,6 +269,20 @@ func mustPosition(t *testing.T, moves string) *board.Position {
 	return p
 }
 
+func TestIsFinal(t *testing.T) {
+	if isFinal(gameState("e2e4", "started")) || !isFinal(gameState("e2e4", "resign")) {
+		t.Error("gameState")
+	}
+	full := gameFull(true, "")
+	if isFinal(full) {
+		t.Error("gameFull started")
+	}
+	full.Full.State.Status = "mate"
+	if !isFinal(full) || isFinal(chatLine("bob", "player", "hi")) {
+		t.Error("gameFull mate / chat")
+	}
+}
+
 func TestDescribeResult(t *testing.T) {
 	tests := []struct {
 		st   lichess.GameState

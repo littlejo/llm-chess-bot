@@ -90,6 +90,10 @@ func (b *Brain) DecideMove(ctx context.Context, s Snapshot) Decision {
 	}
 	for attempt := 0; attempt <= b.MoveRetries; attempt++ {
 		raw, err := b.LLM.Complete(ctx, msgs)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			b.Log.Debug("llm move request canceled (position changed or game over)")
+			break
+		}
 		if err != nil {
 			b.Log.Warn("llm move request failed", "err", err, "attempt", attempt)
 			break
