@@ -1,0 +1,41 @@
+# Development tasks for llm-chess-bot.
+#   mise trust && mise install   # once: installs Go
+#   mise tasks                   # list the tasks
+#   mise run test                # run the tests
+
+[tools]
+go = "1.25"
+
+[env]
+# Secrets (LICHESS_TOKEN, LITELLM_API_KEY...) go in .env, which is git-ignored.
+# See .env.example.
+_.file = ".env"
+CONFIG = "{{ env.CONFIG | default(value='config.json') }}"
+
+[tasks.test]
+description = "Run all tests (unit and integration)"
+run = "go test ./..."
+
+[tasks."test:race"]
+description = "Run the tests with the race detector (needs a C compiler)"
+env = { CGO_ENABLED = "1" }
+run = "go test -race ./..."
+
+[tasks.lint]
+description = "Check formatting and run go vet"
+run = [
+  "test -z \"$(gofmt -l .)\" || { gofmt -l .; echo 'run: gofmt -w .'; exit 1; }",
+  "go vet ./...",
+]
+
+[tasks.build]
+description = "Build bin/llm-chess-bot"
+run = "go build -o bin/llm-chess-bot ./cmd/llm-chess-bot"
+
+[tasks.check]
+description = "Check the Lichess token and the LLM connection using $CONFIG"
+run = "go run ./cmd/llm-chess-bot -config \"$CONFIG\" -check"
+
+[tasks.bot]
+description = "Run the bot on Lichess using $CONFIG (default: config.json)"
+run = "go run ./cmd/llm-chess-bot -config \"$CONFIG\""

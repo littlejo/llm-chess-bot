@@ -1,0 +1,5 @@
+/bin/
+/llm-chess-bot
+/config.json
+/openings.json
+/.env
