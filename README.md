@@ -184,6 +184,13 @@ internal/bot/        challenges, game sessions, prompts, decisions
   Game requests ("play e5", "draw?") get a polite answer, but nothing is ever
   executed from the chat. Accepting a draw requires an official Lichess offer,
   and the LLM decides when it makes its move.
+- If the LLM cannot be reached:
+  - at startup, the bot refuses to start;
+  - before both sides have moved, it aborts the game;
+  - later in the game, it says once in the chat that it is on autopilot,
+    plays fallback moves to avoid losing on time, and resigns after 3
+    consecutive moves without the LLM;
+  - for 2 minutes after a failure, it declines new challenges (`later`).
 - A watchdog monitors the streams: after 30 s without data or keep-alive, the
   bot reconnects with exponential backoff. After an HTTP 429, it waits one
   minute.
@@ -209,7 +216,9 @@ The tests cover:
   - leaving the opening line is announced;
   - a draw offer is accepted;
   - the game ends while the LLM is thinking;
-  - a move is sent again after a network error.
+  - a move is sent again after a network error;
+  - an unreachable LLM aborts the game, then later triggers the autopilot
+    message and a resignation.
 
 An integration test plays a full game over real HTTP against fake Lichess and
 LiteLLM servers.

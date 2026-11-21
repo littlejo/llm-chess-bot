@@ -123,6 +123,11 @@ func (c *Client) Chat(ctx context.Context, gameID, room, text string) error {
 	return c.do(ctx, http.MethodPost, "/api/bot/game/"+url.PathEscape(gameID)+"/chat", form, nil)
 }
 
+// Abort aborts the game (only possible before both players have moved).
+func (c *Client) Abort(ctx context.Context, gameID string) error {
+	return c.do(ctx, http.MethodPost, "/api/bot/game/"+url.PathEscape(gameID)+"/abort", nil, nil)
+}
+
 // Resign resigns the game.
 func (c *Client) Resign(ctx context.Context, gameID string) error {
 	return c.do(ctx, http.MethodPost, "/api/bot/game/"+url.PathEscape(gameID)+"/resign", nil, nil)

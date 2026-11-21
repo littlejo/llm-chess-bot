@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -30,6 +31,7 @@ type fakeAPI struct {
 	streams   int
 	moveErr   error
 	notBot    bool
+	aborted   bool
 }
 
 func newFakeAPI() *fakeAPI {
@@ -100,6 +102,13 @@ func (f *fakeAPI) Chat(_ context.Context, _, room, text string) error {
 	return nil
 }
 
+func (f *fakeAPI) Abort(context.Context, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.aborted = true
+	return nil
+}
+
 func (f *fakeAPI) Resign(context.Context, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -121,15 +130,27 @@ type fakeLLM struct {
 	chat     string
 	opening  string
 	farewell string
+	down     bool // every request fails, as when the gateway is unreachable
+	slow     bool // move requests never answer before their deadline
 }
 
 func (f *fakeLLM) Complete(ctx context.Context, msgs []llm.Message) (string, error) {
-	prompt := msgs[1].Content
+	prompt := msgs[min(1, len(msgs)-1)].Content
 	last := msgs[len(msgs)-1].Content
 	f.mu.Lock()
 	f.prompts = append(f.prompts, last)
+	down, slow := f.down, f.slow
 	f.mu.Unlock()
+	if down {
+		return "", errors.New("connection error")
+	}
+	if slow && strings.Contains(prompt, "It is your turn") {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
 	switch {
+	case strings.Contains(prompt, "pong"):
+		return "pong", nil
 	case strings.Contains(prompt, "It is your turn"):
 		return f.move(last)
 	case strings.Contains(prompt, "New messages from your opponent"):

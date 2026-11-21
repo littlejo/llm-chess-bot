@@ -67,3 +67,38 @@ func TestBotRefusesNonBotAccount(t *testing.T) {
 		t.Fatalf("a challenge was accepted with a non-BOT account: %v", api.accepted)
 	}
 }
+
+func TestBotRefusesToStartWhenLLMIsDown(t *testing.T) {
+	api := newFakeAPI()
+	b := &Bot{API: api, Brain: &Brain{LLM: &fakeLLM{down: true}, Log: discardLogger()}, Config: config.Default(), Log: discardLogger()}
+	if err := b.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "does not answer") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBotDeclinesChallengesWhileLLMIsDown(t *testing.T) {
+	model := &fakeLLM{}
+	brain := &Brain{LLM: model, Log: discardLogger()}
+	if !brain.Available() {
+		t.Fatal("a fresh brain must be available")
+	}
+	model.down = true
+	brain.Ping(context.Background())
+	if brain.Available() {
+		t.Fatal("brain must be unavailable after a failure")
+	}
+
+	api := newFakeAPI()
+	b := &Bot{API: api, Brain: brain, Config: config.Default(), Log: discardLogger(), games: map[string]context.CancelFunc{}}
+	b.onChallenge(context.Background(), lichess.Challenge{ID: "c", Variant: lichess.Variant{Key: "standard"},
+		TimeControl: lichess.TimeControl{Type: "clock", Limit: 600}, Challenger: lichess.User{ID: "bob"}})
+	if api.declined["c"] != "later" {
+		t.Fatalf("declined = %v, accepted = %v", api.declined, api.accepted)
+	}
+
+	model.down = false
+	brain.Ping(context.Background())
+	if !brain.Available() {
+		t.Fatal("a success must make the brain available again")
+	}
+}

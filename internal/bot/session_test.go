@@ -299,3 +299,72 @@ func TestDescribeResult(t *testing.T) {
 		}
 	}
 }
+
+func TestLLMDownAtStartAbortsTheGame(t *testing.T) {
+	api := newFakeAPI()
+	model := &fakeLLM{down: true}
+	wait := startSession(t, api, model, botConfig(false), italian)
+	api.game <- gameFull(true, "")
+	waitFor(t, "abort", func() bool { api.mu.Lock(); defer api.mu.Unlock(); return api.aborted })
+	api.game <- gameState("", "aborted")
+	wait()
+	moves, chats := api.snapshot()
+	if len(moves) != 0 || len(chats) != 1 || chats[0] != msgAbortLLMDown {
+		t.Fatalf("moves = %v, chats = %q", moves, chats)
+	}
+}
+
+func TestLLMDownMidGameAnnouncesThenResigns(t *testing.T) {
+	api := newFakeAPI()
+	model := &fakeLLM{down: true}
+	startSession(t, api, model, botConfig(false), config.Openings{})
+
+	played := board.SplitMoves("e2e4 e7e5 g1f3 b8c6") // resumed game, white to move
+	api.game <- gameFull(true, strings.Join(played, " "))
+	for i := 1; i < maxLLMDownMoves; i++ {
+		waitFor(t, "fallback move", func() bool { m, _ := api.snapshot(); return len(m) == i })
+		moves, _ := api.snapshot()
+		played = append(played, moves[i-1])
+		pos := mustPosition(t, strings.Join(played, " "))
+		played = append(played, pos.LegalMoves()[0]) // opponent's answer
+		api.game <- gameState(strings.Join(played, " "), "started")
+	}
+	waitFor(t, "resignation", func() bool { api.mu.Lock(); defer api.mu.Unlock(); return api.resigned })
+
+	moves, chats := api.snapshot()
+	if len(moves) != maxLLMDownMoves-1 {
+		t.Fatalf("moves = %v", moves)
+	}
+	if strings.Join(chats, "|") != msgAutopilot+"|"+msgResignLLMDown {
+		t.Fatalf("chats = %q", chats)
+	}
+}
+
+func TestSlowLLMIsAnnouncedAndToldAboutAutomaticMoves(t *testing.T) {
+	api := newFakeAPI()
+	model := &fakeLLM{slow: true}
+	cfg := botConfig(false)
+	cfg.MaxThinkSeconds = 1
+	startSession(t, api, model, cfg, italian)
+
+	api.game <- gameFull(true, "e2e4 e7e5") // book move: Nf3
+	waitFor(t, "fallback move", func() bool { m, _ := api.snapshot(); return len(m) == 1 })
+	moves, chats := api.snapshot()
+	if moves[0] != "g1f3" || len(chats) != 1 || chats[0] != msgTooSlow {
+		t.Fatalf("moves = %v, chats = %q", moves, chats)
+	}
+
+	model.mu.Lock()
+	model.slow = false
+	model.move = fixedMove(`{"move": "f1c4"}`)
+	model.mu.Unlock()
+	api.game <- gameState("e2e4 e7e5 g1f3 b8c6", "started")
+	waitFor(t, "second move", func() bool { m, _ := api.snapshot(); return len(m) == 2 })
+	calls := model.calls()
+	if p := calls[len(calls)-1]; !strings.Contains(p, "your move Nf3 was played automatically by the program because you did not answer in time") {
+		t.Fatalf("move prompt does not mention the automatic move:\n%s", p)
+	}
+	if _, chats := api.snapshot(); len(chats) != 1 {
+		t.Fatalf("slowness must be announced only once: %q", chats)
+	}
+}

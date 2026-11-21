@@ -23,11 +23,15 @@ type API interface {
 	StreamGame(ctx context.Context, gameID string, fn func(lichess.GameEvent)) error
 	Move(ctx context.Context, gameID, uci string, offeringDraw bool) error
 	Chat(ctx context.Context, gameID, room, text string) error
+	Abort(ctx context.Context, gameID string) error
 	Resign(ctx context.Context, gameID string) error
 }
 
 const (
 	maxPostFailures = 3 // attempts to send a move for the same ply
+	// maxLLMDownMoves is the number of consecutive moves played without the
+	// LLM (unreachable) before resigning: random moves are no fun.
+	maxLLMDownMoves = 3
 	// Lichess aborts games whose first moves come too late: opening planning
 	// plus the first move must stay well under its delay.
 	planTimeout     = 10 * time.Second
@@ -81,6 +85,7 @@ type Session struct {
 	deviationNoted bool
 
 	thinkSeq     int
+	thinkStarted time.Time
 	thinkingPly  int
 	cancelThink  context.CancelFunc
 	submittedPly int
@@ -89,7 +94,18 @@ type Session struct {
 	chatBusy    bool
 	pendingChat []string
 	finished    bool
+
+	llmDownMoves       int // consecutive moves the LLM could not be reached for
+	autopilotAnnounced bool
 }
+
+// Messages sent when the LLM cannot be reached.
+const (
+	msgAbortLLMDown  = "Sorry, my AI brain is unreachable right now, so I'm aborting this game. Please try again later!"
+	msgAutopilot     = "Sorry, my AI brain is unreachable right now: I'm playing random moves until it comes back."
+	msgResignLLMDown = "My AI brain is still unreachable, so I resign rather than play random moves. Sorry, and well played!"
+	msgTooSlow       = "Sorry, my AI brain is too slow for this time control: when it runs out of time, my move is played automatically (at random)."
+)
 
 // NewSession prepares a session for a game.
 func NewSession(id, me string, api API, brain *Brain, cfg config.Bot, openings config.Openings, log *slog.Logger) *Session {
@@ -139,10 +155,17 @@ func (s *Session) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case err := <-streamDone:
-			if err != nil && ctx.Err() == nil {
-				s.log.Error("game stream failed, leaving the game", "err", err)
+			// Events received before the end of the stream (such as the
+			// final state) are still buffered: handle them first.
+			for len(s.events) > 0 && !s.finished {
+				s.handleEvent(ctx, <-s.events)
 			}
-			return
+			if !s.finished {
+				if err != nil && ctx.Err() == nil {
+					s.log.Error("game stream failed, leaving the game", "err", err)
+				}
+				return
+			}
 		case ev := <-s.events:
 			s.handleEvent(ctx, ev)
 		case r := <-s.moves:
@@ -293,7 +316,7 @@ func (s *Session) maybeThink(ctx context.Context) {
 	tctx, cancel := context.WithTimeout(ctx, budget)
 	s.thinkSeq++
 	seq := s.thinkSeq
-	s.thinkingPly, s.cancelThink = ply, cancel
+	s.thinkingPly, s.cancelThink, s.thinkStarted = ply, cancel, time.Now()
 	s.log.Info("thinking", "ply", ply, "budget", budget.String())
 	go func() {
 		d := s.brain.DecideMove(tctx, snap)
@@ -340,6 +363,9 @@ func (s *Session) handleMove(ctx context.Context, r moveResult) {
 		return
 	}
 	d := r.decision
+	if d.LLMDown && s.handleLLMDown(ctx) {
+		return
+	}
 	if d.Resign {
 		s.log.Info("resigning")
 		if d.Chat != "" {
@@ -366,10 +392,63 @@ func (s *Session) handleMove(ctx context.Context, r moveResult) {
 		return
 	}
 	s.submittedPly = r.ply
-	s.log.Info("move played", "ply", r.ply, "move", uci, "san", san, "fallback", d.Fallback, "offer_draw", d.OfferDraw)
+	if !d.LLMDown {
+		s.llmDownMoves = 0
+	}
+	s.log.Info("move played", "ply", r.ply, "move", uci, "san", san, "fallback", d.Fallback, "timed_out", d.TimedOut,
+		"offer_draw", d.OfferDraw, "think_s", time.Since(s.thinkStarted).Round(100*time.Millisecond).Seconds())
+	if d.Fallback {
+		// Tell the LLM, so that it does not later explain a move it never chose.
+		s.addEntry("note", fmt.Sprintf("your move %s was played automatically by the program because %s: it was not your choice", san, fallbackReason(d)))
+	}
+	if d.TimedOut && !s.autopilotAnnounced {
+		s.autopilotAnnounced = true
+		s.say(ctx, msgTooSlow)
+	}
 	if d.Chat != "" {
 		s.say(ctx, d.Chat)
 	}
+}
+
+func fallbackReason(d Decision) string {
+	switch {
+	case d.LLMDown:
+		return "you could not be reached"
+	case d.TimedOut:
+		return "you did not answer in time"
+	default:
+		return "your answers were not legal moves"
+	}
+}
+
+// handleLLMDown reacts to a move decided without the LLM because it could
+// not be reached. It returns true when the game was aborted or resigned
+// instead of playing the fallback move.
+func (s *Session) handleLLMDown(ctx context.Context) bool {
+	s.llmDownMoves++
+	if s.pos.Ply() < 2 { // Lichess still allows aborting
+		s.log.Warn("llm unreachable at the start of the game, aborting")
+		s.say(ctx, msgAbortLLMDown)
+		if err := s.api.Abort(ctx, s.id); err != nil {
+			s.log.Error("abort failed, playing the fallback move", "err", err)
+			return false
+		}
+		return true
+	}
+	if s.llmDownMoves >= maxLLMDownMoves {
+		s.log.Warn("llm unreachable for too long, resigning", "moves", s.llmDownMoves)
+		s.say(ctx, msgResignLLMDown)
+		if err := s.api.Resign(ctx, s.id); err != nil {
+			s.log.Error("resign failed, playing the fallback move", "err", err)
+			return false
+		}
+		return true
+	}
+	if !s.autopilotAnnounced {
+		s.autopilotAnnounced = true
+		s.say(ctx, msgAutopilot)
+	}
+	return false
 }
 
 func (s *Session) scheduleRetry() {

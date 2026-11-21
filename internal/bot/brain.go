@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/littlejo/llm-chess-bot/internal/board"
@@ -63,6 +64,12 @@ type Decision struct {
 	// Fallback is true when the LLM failed and the move was chosen by the
 	// program (book move or random legal move).
 	Fallback bool
+	// LLMDown is true when the fallback was needed because the LLM could not
+	// be reached (as opposed to answering with unusable moves).
+	LLMDown bool
+	// TimedOut is true when the fallback was needed because the LLM did not
+	// answer within the thinking budget.
+	TimedOut bool
 }
 
 // ChatReply is the answer to opponent messages.
@@ -77,6 +84,41 @@ type Brain struct {
 	Persona     string
 	MoveRetries int
 	Log         *slog.Logger
+
+	// Unix nanoseconds of the last LLM failure and success, shared by all
+	// games to know whether the LLM is currently usable.
+	lastFailure atomic.Int64
+	lastSuccess atomic.Int64
+}
+
+// llmCooldown is how long the LLM is considered down after a failure that no
+// success followed.
+const llmCooldown = 2 * time.Minute
+
+// complete calls the LLM and records whether it answered. Canceled or timed
+// out requests do not count: a slow answer is not an outage.
+func (b *Brain) complete(ctx context.Context, msgs []llm.Message) (string, error) {
+	raw, err := b.LLM.Complete(ctx, msgs)
+	switch {
+	case err == nil:
+		b.lastSuccess.Store(time.Now().UnixNano())
+	case ctx.Err() == nil:
+		b.lastFailure.Store(time.Now().UnixNano())
+	}
+	return raw, err
+}
+
+// Available reports whether the LLM can be relied on: it is not, for
+// llmCooldown, after a failure that was not followed by a success.
+func (b *Brain) Available() bool {
+	failure := b.lastFailure.Load()
+	return failure == 0 || failure < b.lastSuccess.Load() || time.Since(time.Unix(0, failure)) > llmCooldown
+}
+
+// Ping checks that the LLM answers at all.
+func (b *Brain) Ping(ctx context.Context) error {
+	_, err := b.complete(ctx, []llm.Message{{Role: "user", Content: "Reply with the single word: pong"}})
+	return err
 }
 
 // DecideMove asks the LLM for a move. Illegal or unreadable answers are sent
@@ -89,14 +131,17 @@ func (b *Brain) DecideMove(ctx context.Context, s Snapshot) Decision {
 		{Role: "user", Content: movePrompt(s)},
 	}
 	for attempt := 0; attempt <= b.MoveRetries; attempt++ {
-		raw, err := b.LLM.Complete(ctx, msgs)
+		raw, err := b.complete(ctx, msgs)
 		if errors.Is(ctx.Err(), context.Canceled) {
 			b.Log.Debug("llm move request canceled (position changed or game over)")
 			break
 		}
 		if err != nil {
 			b.Log.Warn("llm move request failed", "err", err, "attempt", attempt)
-			break
+			d := fallbackMove(s)
+			d.LLMDown = ctx.Err() == nil // a timeout is slowness, not an outage
+			d.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+			return d
 		}
 		d, err := parseDecision(raw, s.Pos)
 		if err == nil {
@@ -159,7 +204,7 @@ func parseDecision(raw string, pos *board.Position) (Decision, error) {
 
 // ReplyChat answers opponent messages. It can only produce text.
 func (b *Brain) ReplyChat(ctx context.Context, s Snapshot, messages []string) (ChatReply, error) {
-	raw, err := b.LLM.Complete(ctx, []llm.Message{
+	raw, err := b.complete(ctx, []llm.Message{
 		{Role: "system", Content: systemPrompt(b.Persona, s)},
 		{Role: "user", Content: chatPrompt(s, messages)},
 	})
@@ -186,7 +231,7 @@ func (b *Brain) ReplyChat(ctx context.Context, s Snapshot, messages []string) (C
 // PlanOpening asks the LLM to confirm or choose the opening and to write a
 // greeting. When the configured plan already has a line, it is kept as is.
 func (b *Brain) PlanOpening(ctx context.Context, s Snapshot) (Plan, string, error) {
-	raw, err := b.LLM.Complete(ctx, []llm.Message{
+	raw, err := b.complete(ctx, []llm.Message{
 		{Role: "system", Content: systemPrompt(b.Persona, s)},
 		{Role: "user", Content: openingPrompt(s)},
 	})
@@ -217,7 +262,7 @@ func (b *Brain) PlanOpening(ctx context.Context, s Snapshot) (Plan, string, erro
 
 // Farewell asks the LLM for an end of game message.
 func (b *Brain) Farewell(ctx context.Context, s Snapshot, result string) (string, error) {
-	raw, err := b.LLM.Complete(ctx, []llm.Message{
+	raw, err := b.complete(ctx, []llm.Message{
 		{Role: "system", Content: systemPrompt(b.Persona, s)},
 		{Role: "user", Content: farewellPrompt(s, result)},
 	})

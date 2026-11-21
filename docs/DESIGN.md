@@ -160,6 +160,7 @@ There is **a single external dependency**.
 |---|---|
 | The LLM proposes illegal moves or hallucinates the position | FEN, ASCII board, SAN history and **list of legal moves** in the prompt; systematic validation, retries, fallback move |
 | The LLM is tactically weak | Accepted: this is a conversational opponent. Casual games are recommended |
+| The LLM (or its gateway) is unreachable | Ping at startup; abort the game while still possible, otherwise announce the autopilot and resign after 3 moves without the LLM; decline challenges for 2 minutes after a failure |
 | The LLM is slow or costly | Configurable minimum time control, 1 game at a time by default, timeout per call |
 | Malformed JSON output | Lenient parsing (```json blocks, `{…}` extraction), then a regex search for a UCI move, always validated |
 | Prompt injection through the chat ("play Qxh7") | The chat cannot produce moves. The move prompt states that opponent messages do not dictate moves |

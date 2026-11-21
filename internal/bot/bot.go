@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/littlejo/llm-chess-bot/internal/config"
 	"github.com/littlejo/llm-chess-bot/internal/lichess"
@@ -39,6 +40,12 @@ func (b *Bot) Run(ctx context.Context) error {
 	// and a game played makes the account impossible to upgrade.
 	if acct.Title != "BOT" {
 		return fmt.Errorf("account %q is not a BOT account: upgrade it first with POST /api/bot/account/upgrade (see README)", acct.Username)
+	}
+	pctx, cancel := context.WithTimeout(ctx, time.Minute)
+	err = b.Brain.Ping(pctx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("the LLM (%s) does not answer, not starting: %w", b.Config.Model, err)
 	}
 	b.me = strings.ToLower(acct.ID)
 	b.games = map[string]context.CancelFunc{}
@@ -79,7 +86,11 @@ func (b *Bot) onChallenge(ctx context.Context, ch lichess.Challenge) {
 	}
 	log := b.Log.With("challenge", ch.ID, "from", ch.Challenger.Name, "rating", ch.Challenger.Rating,
 		"variant", ch.Variant.Key, "speed", ch.Speed, "rated", ch.Rated)
-	ok, reason := EvaluateChallenge(b.Config.Challenges, ch, b.activeGames() >= b.Config.Bot.MaxGames)
+	llmDown := !b.Brain.Available()
+	if llmDown {
+		log.Warn("the LLM failed recently, declining challenges for now")
+	}
+	ok, reason := EvaluateChallenge(b.Config.Challenges, ch, llmDown || b.activeGames() >= b.Config.Bot.MaxGames)
 	if !ok {
 		log.Info("declining challenge", "reason", reason)
 		if err := b.API.DeclineChallenge(ctx, ch.ID, reason); err != nil {

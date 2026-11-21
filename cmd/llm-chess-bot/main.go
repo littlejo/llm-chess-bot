@@ -92,7 +92,7 @@ func runCheck(ctx context.Context, client *lichess.Client, provider llm.Provider
 	}
 
 	answer, err := provider.Complete(ctx, []llm.Message{
-		{Role: "user", Content: `Reply with exactly this JSON object: {"move": "e2e4"}`},
+		{Role: "user", Content: "Reply with the single word: pong"},
 	})
 	if err != nil {
 		return fmt.Errorf("checking the LLM: %w", err)
