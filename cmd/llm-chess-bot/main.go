@@ -48,7 +48,7 @@ func run(configPath string, check bool) error {
 	if err != nil {
 		return err
 	}
-	provider, err := llm.New(name, providerCfg, model)
+	provider, err := llm.New(name, providerCfg, model, log)
 	if err != nil {
 		return err
 	}

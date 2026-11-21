@@ -133,7 +133,7 @@ func TestIntegrationFullGame(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Challenges.MinInitialSeconds = 60
-	provider, err := llm.New("litellm", llm.ProviderConfig{Options: llm.ProviderOptions{BaseURL: srv.URL + "/v1"}}, "test-model")
+	provider, err := llm.New("litellm", llm.ProviderConfig{Options: llm.ProviderOptions{BaseURL: srv.URL + "/v1"}}, "test-model", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

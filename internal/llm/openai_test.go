@@ -37,7 +37,7 @@ func TestOpenAICompatibleComplete(t *testing.T) {
 	p, err := New("litellm", ProviderConfig{
 		NPM:     "@ai-sdk/openai-compatible",
 		Options: ProviderOptions{BaseURL: srv.URL + "/v1/", APIKey: "sk-test", Headers: map[string]string{"X-Extra": "1"}},
-	}, "gpt-test")
+	}, "gpt-test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestOpenAICompatibleClientErrorNotRetried(t *testing.T) {
 		http.Error(w, "bad key", http.StatusUnauthorized)
 	}))
 	defer srv.Close()
-	p := NewOpenAICompatible(srv.URL, "", "m", nil)
+	p := NewOpenAICompatible(srv.URL, "", "m", nil, nil)
 	if _, err := p.Complete(context.Background(), nil); err == nil {
 		t.Fatal("expected error")
 	}
@@ -67,10 +67,10 @@ func TestOpenAICompatibleClientErrorNotRetried(t *testing.T) {
 }
 
 func TestNewRejectsUnknownProvider(t *testing.T) {
-	if _, err := New("x", ProviderConfig{NPM: "@ai-sdk/anthropic", Options: ProviderOptions{BaseURL: "http://x"}}, "m"); err == nil {
+	if _, err := New("x", ProviderConfig{NPM: "@ai-sdk/anthropic", Options: ProviderOptions{BaseURL: "http://x"}}, "m", nil); err == nil {
 		t.Fatal("expected error")
 	}
-	if _, err := New("x", ProviderConfig{}, "m"); err == nil {
+	if _, err := New("x", ProviderConfig{}, "m", nil); err == nil {
 		t.Fatal("expected error for missing baseURL")
 	}
 }

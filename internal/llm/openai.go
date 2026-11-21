@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -22,10 +23,14 @@ type OpenAICompatible struct {
 	HTTP    *http.Client
 	// Retries is the number of extra attempts after a 429 or 5xx answer.
 	Retries int
+	Log     *slog.Logger
 }
 
 // NewOpenAICompatible returns a client for baseURL (e.g. http://localhost:4000/v1).
-func NewOpenAICompatible(baseURL, apiKey, model string, headers map[string]string) *OpenAICompatible {
+func NewOpenAICompatible(baseURL, apiKey, model string, headers map[string]string, log *slog.Logger) *OpenAICompatible {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	return &OpenAICompatible{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
@@ -33,6 +38,7 @@ func NewOpenAICompatible(baseURL, apiKey, model string, headers map[string]strin
 		Headers: headers,
 		HTTP:    &http.Client{Timeout: 3 * time.Minute},
 		Retries: 1,
+		Log:     log,
 	}
 }
 
@@ -65,6 +71,7 @@ func (c *OpenAICompatible) Complete(ctx context.Context, msgs []Message) (string
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
 		if attempt > 0 {
+			c.Log.Warn("llm request failed, retrying", "attempt", attempt, "err", lastErr)
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
@@ -96,15 +103,20 @@ func (c *OpenAICompatible) once(ctx context.Context, body []byte) (string, error
 	for k, v := range c.Headers {
 		req.Header.Set(k, v)
 	}
+	start := time.Now()
+	c.Log.Debug("llm http request", "url", req.URL.String(), "model", c.Model, "bytes", len(body))
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
+		c.Log.Debug("llm http error", "err", err, "duration_s", seconds(start))
 		return "", err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
+		c.Log.Debug("llm http error while reading the answer", "err", err, "status", resp.StatusCode, "duration_s", seconds(start))
 		return "", err
 	}
+	c.Log.Debug("llm http response", "status", resp.StatusCode, "bytes", len(data), "duration_s", seconds(start))
 	if resp.StatusCode/100 != 2 {
 		return "", &statusError{status: resp.StatusCode, body: truncate(string(data), 500)}
 	}
@@ -116,6 +128,10 @@ func (c *OpenAICompatible) once(ctx context.Context, body []byte) (string, error
 		return "", errors.New("llm: empty response (no choices)")
 	}
 	return cr.Choices[0].Message.Content, nil
+}
+
+func seconds(since time.Time) float64 {
+	return time.Since(since).Round(10 * time.Millisecond).Seconds()
 }
 
 func truncate(s string, n int) string {

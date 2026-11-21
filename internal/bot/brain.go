@@ -95,16 +95,35 @@ type Brain struct {
 const llmCooldown = 2 * time.Minute
 
 // complete calls the LLM and records whether it answered. Canceled or timed
-// out requests do not count: a slow answer is not an outage.
-func (b *Brain) complete(ctx context.Context, msgs []llm.Message) (string, error) {
+// out requests do not count: a slow answer is not an outage. kind ("move",
+// "chat"...) only labels the debug logs.
+func (b *Brain) complete(ctx context.Context, kind string, msgs []llm.Message) (string, error) {
+	if b.Log.Enabled(ctx, slog.LevelDebug) {
+		b.Log.Debug("llm prompt", "kind", kind, "prompt", formatMessages(msgs))
+	}
+	start := time.Now()
 	raw, err := b.LLM.Complete(ctx, msgs)
+	took := time.Since(start).Round(10 * time.Millisecond).Seconds()
 	switch {
 	case err == nil:
 		b.lastSuccess.Store(time.Now().UnixNano())
+		b.Log.Debug("llm answer", "kind", kind, "duration_s", took, "answer", raw)
 	case ctx.Err() == nil:
 		b.lastFailure.Store(time.Now().UnixNano())
+		b.Log.Debug("llm request failed", "kind", kind, "duration_s", took, "err", err)
+	default:
+		b.Log.Debug("llm request canceled", "kind", kind, "duration_s", took)
 	}
 	return raw, err
+}
+
+// formatMessages renders a conversation for the debug logs.
+func formatMessages(msgs []llm.Message) string {
+	var sb strings.Builder
+	for _, m := range msgs {
+		fmt.Fprintf(&sb, "[%s]\n%s\n", m.Role, m.Content)
+	}
+	return sb.String()
 }
 
 // Available reports whether the LLM can be relied on: it is not, for
@@ -116,7 +135,7 @@ func (b *Brain) Available() bool {
 
 // Ping checks that the LLM answers at all.
 func (b *Brain) Ping(ctx context.Context) error {
-	_, err := b.complete(ctx, []llm.Message{{Role: "user", Content: "Reply with the single word: pong"}})
+	_, err := b.complete(ctx, "ping", []llm.Message{{Role: "user", Content: "Reply with the single word: pong"}})
 	return err
 }
 
@@ -135,7 +154,7 @@ func (b *Brain) DecideMove(ctx context.Context, s Snapshot) Decision {
 	msgs := fresh()
 	var downSince time.Time
 	for unusable := 0; ctx.Err() == nil; {
-		raw, err := b.complete(ctx, msgs)
+		raw, err := b.complete(ctx, "move", msgs)
 		if ctx.Err() != nil {
 			b.Log.Debug("llm move request canceled (position changed or game over)")
 			break
@@ -228,7 +247,7 @@ func parseDecision(raw string, pos *board.Position) (Decision, error) {
 
 // ReplyChat answers opponent messages. It can only produce text.
 func (b *Brain) ReplyChat(ctx context.Context, s Snapshot, messages []string) (ChatReply, error) {
-	raw, err := b.complete(ctx, []llm.Message{
+	raw, err := b.complete(ctx, "chat", []llm.Message{
 		{Role: "system", Content: systemPrompt(b.Persona, s)},
 		{Role: "user", Content: chatPrompt(s, messages)},
 	})
@@ -255,7 +274,7 @@ func (b *Brain) ReplyChat(ctx context.Context, s Snapshot, messages []string) (C
 // PlanOpening asks the LLM to confirm or choose the opening and to write a
 // greeting. When the configured plan already has a line, it is kept as is.
 func (b *Brain) PlanOpening(ctx context.Context, s Snapshot) (Plan, string, error) {
-	raw, err := b.complete(ctx, []llm.Message{
+	raw, err := b.complete(ctx, "opening", []llm.Message{
 		{Role: "system", Content: systemPrompt(b.Persona, s)},
 		{Role: "user", Content: openingPrompt(s)},
 	})
@@ -286,7 +305,7 @@ func (b *Brain) PlanOpening(ctx context.Context, s Snapshot) (Plan, string, erro
 
 // Farewell asks the LLM for an end of game message.
 func (b *Brain) Farewell(ctx context.Context, s Snapshot, result string) (string, error) {
-	raw, err := b.complete(ctx, []llm.Message{
+	raw, err := b.complete(ctx, "farewell", []llm.Message{
 		{Role: "system", Content: systemPrompt(b.Persona, s)},
 		{Role: "user", Content: farewellPrompt(s, result)},
 	})

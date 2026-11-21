@@ -5,6 +5,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // Message is one chat message sent to the model.
@@ -43,13 +44,13 @@ type ProviderOptions struct {
 // New builds a provider. Only OpenAI-compatible APIs (LiteLLM, the default of
 // opencode for custom providers) are implemented; other kinds can be added
 // here without touching the bot.
-func New(name string, cfg ProviderConfig, model string) (Provider, error) {
+func New(name string, cfg ProviderConfig, model string, log *slog.Logger) (Provider, error) {
 	switch cfg.NPM {
 	case "", "@ai-sdk/openai-compatible", "@ai-sdk/openai":
 		if cfg.Options.BaseURL == "" {
 			return nil, fmt.Errorf("provider %q: options.baseURL is required", name)
 		}
-		return NewOpenAICompatible(cfg.Options.BaseURL, cfg.Options.APIKey, model, cfg.Options.Headers), nil
+		return NewOpenAICompatible(cfg.Options.BaseURL, cfg.Options.APIKey, model, cfg.Options.Headers, log), nil
 	default:
 		return nil, fmt.Errorf("provider %q: npm package %q is not supported (use @ai-sdk/openai-compatible)", name, cfg.NPM)
 	}

@@ -130,7 +130,7 @@ the environment only.
 | | `chat_memory` | `40` | Chat transcript entries included in prompts |
 | | `move_retries` | `2` | LLM retries after an illegal move |
 | | `greet` | `true` | Greet, announce the opening and say goodbye |
-| `log` | `level`, `format` | `info`, `json` | Structured logs (`json` or `text`) |
+| `log` | `level`, `format` | `info`, `json` | Structured logs (`json` or `text`). `debug` adds every LLM prompt and raw answer, the duration and status of each HTTP request, and every line received from Lichess |
 
 ### Opening instructions
 

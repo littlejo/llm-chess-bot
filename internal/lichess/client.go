@@ -204,12 +204,16 @@ func (c *Client) doOnce(ctx context.Context, method, path string, form url.Value
 	if err != nil {
 		return err
 	}
+	start := time.Now()
 	c.mu.Lock()
 	resp, err := c.HTTP.Do(req)
 	c.mu.Unlock()
 	if err != nil {
+		c.Log.Debug("lichess request failed", "method", method, "path", path, "err", err)
 		return err
 	}
+	c.Log.Debug("lichess request", "method", method, "path", path, "status", resp.StatusCode,
+		"duration_s", time.Since(start).Round(10*time.Millisecond).Seconds())
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -243,6 +247,7 @@ func (c *Client) stream(ctx context.Context, path string, onLine func([]byte)) e
 		return err
 	}
 	req.Header.Set("Accept", "application/x-ndjson")
+	c.Log.Debug("lichess stream opening", "path", path)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return err
@@ -261,6 +266,7 @@ func (c *Client) stream(ctx context.Context, path string, onLine func([]byte)) e
 	for {
 		line, err := r.ReadBytes('\n')
 		if line = bytes.TrimSpace(line); len(line) > 0 {
+			c.Log.Debug("lichess stream line", "path", path, "line", string(line))
 			onLine(line)
 		}
 		if err != nil {
