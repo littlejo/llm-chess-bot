@@ -111,8 +111,8 @@ func (f *fakeServer) handler() http.Handler {
 		case strings.Contains(prompt, "The game is starting"):
 			answer = `{"name": "Ruy Lopez", "moves": "1. e4 e5 2. Nf3 Nc6 3. Bb5", "greeting": "Hello Bob! I will play the Ruy Lopez."}`
 		case strings.Contains(prompt, "It is your turn"):
-			uci := regexp.MustCompile(`- UCI: (\S+)`).FindStringSubmatch(prompt)[1]
-			answer = fmt.Sprintf(`{"move": %q}`, uci)
+			san := regexp.MustCompile(`## Your legal moves \(SAN\)\n(\S+)`).FindStringSubmatch(prompt)[1]
+			answer = fmt.Sprintf(`{"move": %q}`, san)
 		case strings.Contains(prompt, "New messages"):
 			answer = `{"intent": "game", "reply": "It leads to rich positions!"}`
 		}

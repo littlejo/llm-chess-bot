@@ -232,7 +232,7 @@ func parseDecision(raw string, pos *board.Position) (Decision, error) {
 		}
 		uci, err := pos.ParseMove(out.Move)
 		if err != nil {
-			return Decision{}, fmt.Errorf("%q is not a legal move in this position", out.Move)
+			return Decision{}, fmt.Errorf("%q is not a legal move in this position. %s", out.Move, pos.Explain(out.Move))
 		}
 		d.Move = uci
 		return d, nil
@@ -242,7 +242,7 @@ func parseDecision(raw string, pos *board.Position) (Decision, error) {
 			return Decision{Move: uci}, nil
 		}
 	}
-	return Decision{}, errors.New("no JSON object with a legal \"move\" found")
+	return Decision{}, errors.New("no JSON object with a \"move\" was found.")
 }
 
 // ReplyChat answers opponent messages. It can only produce text.

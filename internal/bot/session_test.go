@@ -139,7 +139,8 @@ func TestIllegalMovesAreRetriedUntilLegal(t *testing.T) {
 	if len(calls) != illegal+1 {
 		t.Fatalf("llm calls = %d", len(calls))
 	}
-	if !strings.Contains(calls[1], `"e2e5" is not a legal move`) {
+	if !strings.Contains(calls[1], `"e2e5" is not a legal move in this position. Your pawn on e2 cannot go to e5; its legal moves are e3, e4.`) ||
+		!strings.Contains(calls[1], "choose exactly one move from this list (SAN): Na3 Nc3") {
 		t.Fatalf("retry prompt does not explain the error:\n%s", calls[1])
 	}
 	// After MoveRetries corrections, the conversation starts over.
@@ -169,7 +170,7 @@ func TestBookMoveIsSuggested(t *testing.T) {
 	startSession(t, api, model, botConfig(false), italian)
 	api.game <- gameFull(true, "e2e4 e7e5")
 	waitFor(t, "move", func() bool { m, _ := api.snapshot(); return len(m) == 1 })
-	if p := model.calls()[0]; !strings.Contains(p, "Its next move is Nf3 (g1f3)") {
+	if p := model.calls()[0]; !strings.Contains(p, "Its next move is Nf3:") {
 		t.Fatalf("prompt lacks the book move:\n%s", p)
 	}
 }

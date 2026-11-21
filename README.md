@@ -8,9 +8,11 @@ program itself makes sure that no illegal move is ever sent.
   casual, and human or bot.
 - It plays through the Lichess Bot API, follows games by streaming and
   reconnects on its own.
-- The LLM picks its moves in UCI format and the chess library validates them.
-  After an illegal move, the LLM is asked again with the error, until it gives
-  a legal one. **Every move comes from the LLM**: the program never plays a
+- The LLM picks its moves in standard algebraic notation (SAN: `Nf3`, `exd5`,
+  `O-O`), which LLMs handle better than UCI, and the chess library validates
+  them. After an illegal move, the LLM is told why it is illegal ("your bishop
+  on f1 cannot go to g5… did you mean Bg5?", "first move the pieces between
+  your king and rook") and asked again, until it gives a legal one. **Every move comes from the LLM**: the program never plays a
   move by itself, and it waits for the LLM's answer even if that costs time on
   the clock.
 - The player chat is followed. Messages are classified as "conversation" or
@@ -128,7 +130,7 @@ the environment only.
 | | `persona` | friendly and talkative | Personality given to the LLM |
 | | `max_think_seconds` | `60` | Expected thinking time per move, also bounded by the clock (about 1/25 of the remaining time). The bot always waits for the LLM; past this time, it tells the opponent once that it is slow |
 | | `chat_memory` | `40` | Chat transcript entries included in prompts |
-| | `move_retries` | `2` | LLM retries after an illegal move |
+| | `move_retries` | `2` | Corrections in a row after illegal moves before the move conversation starts over (the bot keeps asking until the move is legal) |
 | | `greet` | `true` | Greet, announce the opening and say goodbye |
 | `log` | `level`, `format` | `info`, `json` | Structured logs (`json` or `text`). `debug` adds every LLM prompt and raw answer, the duration and status of each HTTP request, and every line received from Lichess |
 

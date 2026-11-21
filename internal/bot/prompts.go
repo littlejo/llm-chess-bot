@@ -53,8 +53,7 @@ func gameContext(s Snapshot, withLegalMoves bool) string {
 	fmt.Fprintf(&sb, "- FEN: %s\n", s.Pos.FEN())
 	fmt.Fprintf(&sb, "\n## Board (your side at the bottom, uppercase = white)\n%s\n", s.Pos.Diagram(s.Color))
 	if withLegalMoves {
-		fmt.Fprintf(&sb, "\n## Your legal moves\n- UCI: %s\n- SAN: %s\n",
-			strings.Join(s.Pos.LegalMoves(), " "), strings.Join(s.Pos.LegalMovesSAN(), " "))
+		fmt.Fprintf(&sb, "\n## Your legal moves (SAN)\n%s\n", strings.Join(s.Pos.LegalMovesSAN(), " "))
 	}
 	sb.WriteString("\n## Opening plan\n")
 	sb.WriteString(planText(s))
@@ -84,7 +83,7 @@ func planText(s Snapshot) string {
 	switch s.Book.State {
 	case board.InBook:
 		if s.Pos.Turn() == s.Color {
-			fmt.Fprintf(&sb, "- The game follows the planned line. Its next move is %s (%s): play it unless it is clearly bad.\n", s.Book.NextSAN, s.Book.NextUCI)
+			fmt.Fprintf(&sb, "- The game follows the planned line. Its next move is %s: play it unless it is clearly bad.\n", s.Book.NextSAN)
 		} else {
 			sb.WriteString("- The game follows the planned line so far.\n")
 		}
@@ -110,8 +109,9 @@ func movePrompt(s Snapshot) string {
 	sb.WriteString(`
 ## Your task
 It is your turn: choose your move from the legal moves list.
+Write the move in SAN (standard algebraic notation, e.g. e4, Nf3, exd5, O-O, e8=Q), exactly as it appears in the list. A move that is not in the list is impossible: for example, you cannot castle when castling is not listed.
 Answer with exactly this JSON object:
-{"move": "<UCI move, e.g. e2e4>", "chat": "<optional message to your opponent, or empty>", "offer_draw": false, "resign": false}
+{"move": "<your move in SAN>", "chat": "<optional message to your opponent, or empty>", "offer_draw": false, "resign": false}
 Use "chat" only now and then: to explain your opening choice, to react when the opponent leaves your planned line, or at a key moment. Leave it empty most of the time.
 Only resign in a completely lost position.`)
 	return sb.String()
@@ -162,9 +162,9 @@ Answer with exactly this JSON object:
 }
 
 func retryPrompt(problem string, s Snapshot) string {
-	return fmt.Sprintf(`Your answer could not be used: %s.
-Choose exactly one move from this list (UCI): %s
-Answer again with the JSON object only.`, problem, strings.Join(s.Pos.LegalMoves(), " "))
+	return fmt.Sprintf(`Your answer could not be used: %s
+Look at the board again, then choose exactly one move from this list (SAN): %s
+Answer again with the JSON object only.`, problem, strings.Join(s.Pos.LegalMovesSAN(), " "))
 }
 
 func ratedWord(rated bool) string {

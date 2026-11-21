@@ -117,16 +117,28 @@ func (p *Position) ParseMove(move string) (string, error) {
 		return "", fmt.Errorf("%w: %s", ErrIllegalMove, move)
 	}
 
-	san := cleanSAN(move)
+	// SAN is compared loosely ("Bd6" for "Bxd6", "e8Q" for "e8=Q"), as long
+	// as a single legal move matches.
+	san := looseSAN(move)
+	var found []string
 	for i := range legal {
-		if strings.TrimRight(chess.AlgebraicNotation{}.Encode(pos, &legal[i]), "+#") == san {
-			return legal[i].String(), nil
+		if looseSAN(chess.AlgebraicNotation{}.Encode(pos, &legal[i])) == san {
+			found = append(found, legal[i].String())
 		}
+	}
+	if len(found) == 1 {
+		return found[0], nil
 	}
 	return "", fmt.Errorf("%w: %s", ErrIllegalMove, move)
 }
 
 var uciPattern = regexp.MustCompile(`^[a-h][1-8][a-h][1-8][qrbn]?$`)
+
+// looseSAN removes from a SAN move what the LLM often gets wrong without
+// changing its meaning: annotations, capture and promotion signs.
+func looseSAN(s string) string {
+	return strings.NewReplacer("x", "", "=", "").Replace(cleanSAN(s))
+}
 
 // cleanSAN removes annotations the LLM may add (check marks, "!?") and
 // accepts zeros for castling. Checks are compared without "+"/"#".

@@ -78,9 +78,14 @@ Principles:
   text. Only the "move" path, triggered by "it is my turn at this ply", sends a
   move. A received message therefore never makes the bot play.
 - **The LLM proposes, `board` decides.** Every move goes through the chess
-  library's validation before it is sent. On failure, the LLM is asked again
-  with the error and the list of legal moves, until it gives a legal move
-  (the conversation starts over every 3 attempts to keep the prompt short).
+  library's validation before it is sent. The LLM writes moves in SAN, the
+  notation it knows best; UCI is accepted too, and SAN is matched loosely
+  (`Bd6` for `Bxd6`). On failure, `board.Explain` tells the LLM why the move is
+  illegal (wrong piece or square, ambiguity, missing promotion, why castling is
+  impossible, check) and suggests the closest legal moves. The LLM is asked
+  again with that explanation and the list of legal moves, until it gives a
+  legal move (the conversation starts over every 3 attempts to keep the
+  prompt short).
   The program never chooses a move by itself, and no engine is used.
 - **The conversation context is a per-game transcript.** It holds the
   messages from both sides, move explanations and the opening plan. It is

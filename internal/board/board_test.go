@@ -188,3 +188,56 @@ func TestFollow(t *testing.T) {
 		t.Errorf("empty line: %+v", got)
 	}
 }
+
+func TestParseMoveLooseSAN(t *testing.T) {
+	p := mustMoves(t, "e2e4 d7d6 g1f3 g8f6 d2d4 g7g6 c1f4 f8g7")
+	for in, want := range map[string]string{"Bd6": "f4d6", "Bxd6": "f4d6", "Nbd2": "b1d2"} {
+		if got, err := p.ParseMove(in); err != nil || got != want {
+			t.Errorf("ParseMove(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := p.ParseMove("Nd2"); err == nil {
+		t.Error("an ambiguous SAN move must be rejected")
+	}
+}
+
+func TestExplain(t *testing.T) {
+	pirc := "e2e4 d7d6 g1f3 g8f6 d2d4 g7g6 c1f4 f8g7"
+	promo, err := FromMoves("8/4P3/8/8/8/8/k7/4K3 w - - 0 1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		pos  *Position
+		move string
+		want []string
+	}{
+		{mustMoves(t, pirc), "f1g5", []string{"Your bishop on f1 cannot go to g5; its legal moves are Be2, Bd3", "Did you mean Bg5?"}},
+		{mustMoves(t, pirc), "O-O", []string{"cannot castle kingside yet", "(bishop on f1)"}},
+		{mustMoves(t, pirc), "e1g1", []string{"cannot castle kingside yet"}},
+		{mustMoves(t, pirc+" h1g1 e8g8"), "O-O", []string{"no longer castle kingside"}},
+		{mustMoves(t, pirc), "Nd2", []string{"Several knights can go to d2", "Nbd2", "Nfd2"}},
+		{mustMoves(t, pirc), "Bh7", []string{"None of your bishops can go to h7 (bishop on f1: Be2, Bd3"}},
+		{mustMoves(t, pirc), "e2e4", []string{"There is no piece on e2"}},
+		{mustMoves(t, pirc), "hello", []string{"not written in SAN"}},
+		{mustMoves(t, "e2e4 d7d5 f1b5"), "a7a6", []string{"You are in check", "Your pawn on a7 cannot go to a6"}},
+		{promo, "e8", []string{"must promote", "e8=Q"}},
+	}
+	for _, tt := range tests {
+		got := tt.pos.Explain(tt.move)
+		for _, w := range tt.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("Explain(%q) = %q, want it to contain %q", tt.move, got, w)
+			}
+		}
+	}
+}
+
+func mustMoves(t *testing.T, moves string) *Position {
+	t.Helper()
+	p, err := FromMoves(StartPos, SplitMoves(moves))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
