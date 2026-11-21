@@ -24,7 +24,8 @@ func botConfig(greet bool) config.Bot {
 // waits for its end.
 func startSession(t *testing.T, api *fakeAPI, model *fakeLLM, cfg config.Bot, openings config.Openings) (wait func()) {
 	t.Helper()
-	brain := &Brain{LLM: model, Persona: "test persona", MoveRetries: cfg.MoveRetries, Log: discardLogger()}
+	brain := &Brain{LLM: model, Persona: "test persona", MoveRetries: cfg.MoveRetries, Log: discardLogger(),
+		RetryPause: 5 * time.Millisecond, MaxOutage: 50 * time.Millisecond}
 	s := NewSession("g1", "LLMBot", api, brain, cfg, openings, discardLogger())
 	s.retryDelay = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,24 +116,35 @@ func TestChatNeverTriggersAMove(t *testing.T) {
 	}
 }
 
-func TestIllegalMovesAreRetriedThenFallback(t *testing.T) {
+func TestIllegalMovesAreRetriedUntilLegal(t *testing.T) {
 	api := newFakeAPI()
-	model := &fakeLLM{move: fixedMove(`{"move": "e2e5"}`)}
 	cfg := botConfig(false)
+	illegal := cfg.MoveRetries + 2 // more than one round of retries
+	n := 0
+	model := &fakeLLM{move: func(string) (string, error) {
+		if n++; n <= illegal {
+			return `{"move": "e2e5"}`, nil
+		}
+		return `{"move": "d2d4"}`, nil
+	}}
 	startSession(t, api, model, cfg, italian)
 
 	api.game <- gameFull(true, "")
-	waitFor(t, "fallback move", func() bool { m, _ := api.snapshot(); return len(m) == 1 })
+	waitFor(t, "move", func() bool { m, _ := api.snapshot(); return len(m) == 1 })
 	moves, _ := api.snapshot()
-	if moves[0] != "e2e4" { // book move of the Italian Game
-		t.Fatalf("fallback move = %s, want the book move e2e4", moves[0])
+	if moves[0] != "d2d4" { // the LLM's move, not the book move e2e4
+		t.Fatalf("move = %s, want the LLM's move d2d4", moves[0])
 	}
 	calls := model.calls()
-	if len(calls) != cfg.MoveRetries+1 {
+	if len(calls) != illegal+1 {
 		t.Fatalf("llm calls = %d", len(calls))
 	}
 	if !strings.Contains(calls[1], `"e2e5" is not a legal move`) {
 		t.Fatalf("retry prompt does not explain the error:\n%s", calls[1])
+	}
+	// After MoveRetries corrections, the conversation starts over.
+	if p := calls[cfg.MoveRetries+1]; !strings.Contains(p, "It is your turn") || strings.Contains(p, "not a legal move") {
+		t.Fatalf("conversation was not restarted:\n%s", p)
 	}
 }
 
@@ -240,7 +252,7 @@ func TestMoveIsResentAfterLichessError(t *testing.T) {
 	waitFor(t, "move after retry", func() bool { m, _ := api.snapshot(); return len(m) == 1 })
 }
 
-func TestThinkBudget(t *testing.T) {
+func TestExpectedThinkTime(t *testing.T) {
 	max := 60 * time.Second
 	tests := []struct {
 		snap Snapshot
@@ -250,12 +262,10 @@ func TestThinkBudget(t *testing.T) {
 		{Snapshot{HasClock: true, MyTime: 5 * time.Minute, Increment: 3 * time.Second}, 12*time.Second + 2250*time.Millisecond - 300*time.Millisecond},
 		{Snapshot{HasClock: true, MyTime: 2 * time.Second}, 500 * time.Millisecond},
 		{Snapshot{HasClock: true, MyTime: time.Hour}, max},
-		{Snapshot{HasClock: true, MyTime: time.Hour, Pos: mustPosition(t, "e2e4")}, firstMoveBudget},
-		{Snapshot{HasClock: true, MyTime: time.Hour, Pos: mustPosition(t, "e2e4 e7e5")}, max},
 	}
 	for _, tt := range tests {
-		if got := thinkBudget(tt.snap, max); got != tt.want {
-			t.Errorf("thinkBudget(%+v) = %v, want %v", tt.snap, got, tt.want)
+		if got := expectedThinkTime(tt.snap, max); got != tt.want {
+			t.Errorf("expectedThinkTime(%+v) = %v, want %v", tt.snap, got, tt.want)
 		}
 	}
 }
@@ -314,56 +324,75 @@ func TestLLMDownAtStartAbortsTheGame(t *testing.T) {
 	}
 }
 
-func TestLLMDownMidGameAnnouncesThenResigns(t *testing.T) {
+func TestLLMDownMidGameResignsWithoutRandomMoves(t *testing.T) {
 	api := newFakeAPI()
 	model := &fakeLLM{down: true}
 	startSession(t, api, model, botConfig(false), config.Openings{})
 
-	played := board.SplitMoves("e2e4 e7e5 g1f3 b8c6") // resumed game, white to move
-	api.game <- gameFull(true, strings.Join(played, " "))
-	for i := 1; i < maxLLMDownMoves; i++ {
-		waitFor(t, "fallback move", func() bool { m, _ := api.snapshot(); return len(m) == i })
-		moves, _ := api.snapshot()
-		played = append(played, moves[i-1])
-		pos := mustPosition(t, strings.Join(played, " "))
-		played = append(played, pos.LegalMoves()[0]) // opponent's answer
-		api.game <- gameState(strings.Join(played, " "), "started")
-	}
+	api.game <- gameFull(true, "e2e4 e7e5 g1f3 b8c6") // resumed game, white to move
 	waitFor(t, "resignation", func() bool { api.mu.Lock(); defer api.mu.Unlock(); return api.resigned })
 
 	moves, chats := api.snapshot()
-	if len(moves) != maxLLMDownMoves-1 {
-		t.Fatalf("moves = %v", moves)
+	if len(moves) != 0 {
+		t.Fatalf("moves played without the LLM: %v", moves)
 	}
-	if strings.Join(chats, "|") != msgAutopilot+"|"+msgResignLLMDown {
+	if len(chats) != 1 || chats[0] != msgResignLLMDown {
 		t.Fatalf("chats = %q", chats)
+	}
+	if n := len(model.calls()); n < 2 {
+		t.Fatalf("the LLM was not retried: %d calls", n)
 	}
 }
 
-func TestSlowLLMIsAnnouncedAndToldAboutAutomaticMoves(t *testing.T) {
+func TestLLMErrorsAreRetried(t *testing.T) {
 	api := newFakeAPI()
-	model := &fakeLLM{slow: true}
+	n := 0
+	model := &fakeLLM{move: func(string) (string, error) {
+		if n++; n <= 2 {
+			return "", errors.New("HTTP 500")
+		}
+		return `{"move": "f1c4"}`, nil
+	}}
+	startSession(t, api, model, botConfig(false), config.Openings{})
+	api.game <- gameFull(true, "e2e4 e7e5 g1f3 b8c6")
+	waitFor(t, "move", func() bool { m, _ := api.snapshot(); return len(m) == 1 })
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.moves[0] != "f1c4" || api.resigned || len(api.chats) != 0 {
+		t.Fatalf("moves = %v, resigned = %v, chats = %q", api.moves, api.resigned, api.chats)
+	}
+}
+
+func TestSlowLLMIsWaitedForAndAnnounced(t *testing.T) {
+	api := newFakeAPI()
+	release := make(chan struct{})
+	model := &fakeLLM{move: func(prompt string) (string, error) {
+		<-release
+		if strings.Contains(prompt, "Moves so far: 1. e4 e5 2. Nc3") {
+			return `{"move": "g1f3"}`, nil
+		}
+		return `{"move": "b1c3"}`, nil
+	}}
 	cfg := botConfig(false)
 	cfg.MaxThinkSeconds = 1
 	startSession(t, api, model, cfg, italian)
 
 	api.game <- gameFull(true, "e2e4 e7e5") // book move: Nf3
-	waitFor(t, "fallback move", func() bool { m, _ := api.snapshot(); return len(m) == 1 })
+	waitFor(t, "slowness announcement", func() bool { _, c := api.snapshot(); return len(c) == 1 })
 	moves, chats := api.snapshot()
-	if moves[0] != "g1f3" || len(chats) != 1 || chats[0] != msgTooSlow {
+	if len(moves) != 0 || chats[0] != msgTooSlow {
 		t.Fatalf("moves = %v, chats = %q", moves, chats)
 	}
 
-	model.mu.Lock()
-	model.slow = false
-	model.move = fixedMove(`{"move": "f1c4"}`)
-	model.mu.Unlock()
-	api.game <- gameState("e2e4 e7e5 g1f3 b8c6", "started")
-	waitFor(t, "second move", func() bool { m, _ := api.snapshot(); return len(m) == 2 })
-	calls := model.calls()
-	if p := calls[len(calls)-1]; !strings.Contains(p, "your move Nf3 was played automatically by the program because you did not answer in time") {
-		t.Fatalf("move prompt does not mention the automatic move:\n%s", p)
+	close(release) // the LLM finally answers
+	waitFor(t, "move", func() bool { m, _ := api.snapshot(); return len(m) == 1 })
+	if moves, _ := api.snapshot(); moves[0] != "b1c3" {
+		t.Fatalf("move = %s, want the LLM's move b1c3", moves[0])
 	}
+
+	api.game <- gameState("e2e4 e7e5 b1c3 b8c6", "started")
+	waitFor(t, "second move", func() bool { m, _ := api.snapshot(); return len(m) == 2 })
+	time.Sleep(1100 * time.Millisecond) // past the expected time again
 	if _, chats := api.snapshot(); len(chats) != 1 {
 		t.Fatalf("slowness must be announced only once: %q", chats)
 	}

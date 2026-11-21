@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -55,21 +54,16 @@ type Entry struct {
 	Text    string
 }
 
-// Decision is the move chosen for a position. Move is always legal.
+// Decision is the move chosen by the LLM for a position. Move is always
+// legal; it is empty when the LLM resigns or could not be reached.
 type Decision struct {
 	Move      string // UCI
 	Chat      string
 	OfferDraw bool
 	Resign    bool
-	// Fallback is true when the LLM failed and the move was chosen by the
-	// program (book move or random legal move).
-	Fallback bool
-	// LLMDown is true when the fallback was needed because the LLM could not
-	// be reached (as opposed to answering with unusable moves).
+	// LLMDown is true when there is no move because the LLM could not be
+	// reached for longer than the Brain's MaxOutage.
 	LLMDown bool
-	// TimedOut is true when the fallback was needed because the LLM did not
-	// answer within the thinking budget.
-	TimedOut bool
 }
 
 // ChatReply is the answer to opponent messages.
@@ -84,6 +78,11 @@ type Brain struct {
 	Persona     string
 	MoveRetries int
 	Log         *slog.Logger
+	// RetryPause is the pause before asking again after a failed request
+	// (default 5 s). MaxOutage is how long a move request keeps retrying an
+	// unreachable LLM before giving up (default llmCooldown).
+	RetryPause time.Duration
+	MaxOutage  time.Duration
 
 	// Unix nanoseconds of the last LLM failure and success, shared by all
 	// games to know whether the LLM is currently usable.
@@ -121,53 +120,78 @@ func (b *Brain) Ping(ctx context.Context) error {
 	return err
 }
 
-// DecideMove asks the LLM for a move. Illegal or unreadable answers are sent
-// back to the LLM with the error; after MoveRetries failures, or if the LLM
-// is unavailable or out of time, a fallback move is played. The returned move
-// is always legal in s.Pos.
+// DecideMove asks the LLM for a move and waits for it as long as it takes:
+// the program never chooses a move by itself. Illegal or unreadable answers
+// are sent back to the LLM with the error, and failed requests are retried
+// after a pause. It returns without a move when ctx is canceled (position
+// changed, game over) or when the LLM stays unreachable for MaxOutage.
 func (b *Brain) DecideMove(ctx context.Context, s Snapshot) Decision {
-	msgs := []llm.Message{
-		{Role: "system", Content: systemPrompt(b.Persona, s)},
-		{Role: "user", Content: movePrompt(s)},
+	fresh := func() []llm.Message {
+		return []llm.Message{
+			{Role: "system", Content: systemPrompt(b.Persona, s)},
+			{Role: "user", Content: movePrompt(s)},
+		}
 	}
-	for attempt := 0; attempt <= b.MoveRetries; attempt++ {
+	msgs := fresh()
+	var downSince time.Time
+	for unusable := 0; ctx.Err() == nil; {
 		raw, err := b.complete(ctx, msgs)
-		if errors.Is(ctx.Err(), context.Canceled) {
+		if ctx.Err() != nil {
 			b.Log.Debug("llm move request canceled (position changed or game over)")
 			break
 		}
 		if err != nil {
-			b.Log.Warn("llm move request failed", "err", err, "attempt", attempt)
-			d := fallbackMove(s)
-			d.LLMDown = ctx.Err() == nil // a timeout is slowness, not an outage
-			d.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
-			return d
+			if downSince.IsZero() {
+				downSince = time.Now()
+			}
+			if time.Since(downSince) >= b.maxOutage() {
+				b.Log.Error("llm unreachable for too long, giving up", "err", err, "since", downSince)
+				return Decision{LLMDown: true}
+			}
+			b.Log.Warn("llm move request failed, retrying", "err", err)
+			pause(ctx, b.retryPause())
+			continue
 		}
+		downSince = time.Time{}
 		d, err := parseDecision(raw, s.Pos)
 		if err == nil {
 			return d
 		}
-		b.Log.Warn("llm proposed an unusable move", "err", err, "answer", truncate(raw, 300), "attempt", attempt)
+		unusable++
+		b.Log.Warn("llm proposed an unusable move, asking again", "err", err, "answer", truncate(raw, 300), "attempt", unusable)
+		if unusable%(b.MoveRetries+1) == 0 {
+			msgs = fresh() // start over instead of growing the conversation forever
+			continue
+		}
 		msgs = append(msgs,
 			llm.Message{Role: "assistant", Content: raw},
 			llm.Message{Role: "user", Content: retryPrompt(err.Error(), s)})
 	}
-	return fallbackMove(s)
+	return Decision{}
 }
 
-// fallbackMove plays the book move when there is one, otherwise a random
-// legal move. It never calls an engine.
-func fallbackMove(s Snapshot) Decision {
-	if s.Book.State == board.InBook && s.Pos.Turn() == s.Color {
-		if uci, err := s.Pos.ParseMove(s.Book.NextUCI); err == nil {
-			return Decision{Move: uci, Fallback: true}
-		}
+func (b *Brain) retryPause() time.Duration {
+	if b.RetryPause > 0 {
+		return b.RetryPause
 	}
-	legal := s.Pos.LegalMoves()
-	if len(legal) == 0 {
-		return Decision{Fallback: true}
+	return 5 * time.Second
+}
+
+func (b *Brain) maxOutage() time.Duration {
+	if b.MaxOutage > 0 {
+		return b.MaxOutage
 	}
-	return Decision{Move: legal[rand.IntN(len(legal))], Fallback: true}
+	return llmCooldown
+}
+
+// pause waits for d or until ctx is canceled.
+func pause(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 var uciToken = regexp.MustCompile(`\b[a-h][1-8][a-h][1-8][qrbn]?\b`)

@@ -29,13 +29,9 @@ type API interface {
 
 const (
 	maxPostFailures = 3 // attempts to send a move for the same ply
-	// maxLLMDownMoves is the number of consecutive moves played without the
-	// LLM (unreachable) before resigning: random moves are no fun.
-	maxLLMDownMoves = 3
 	// Lichess aborts games whose first moves come too late: opening planning
-	// plus the first move must stay well under its delay.
+	// must not delay the first move for long.
 	planTimeout     = 10 * time.Second
-	firstMoveBudget = 15 * time.Second
 	chatTimeout     = 45 * time.Second
 	farewellTimeout = 20 * time.Second
 )
@@ -72,6 +68,7 @@ type Session struct {
 	moves  chan moveResult
 	chats  chan chatResult
 	retry  chan struct{}
+	slow   chan int    // thinkSeq of a move request that exceeds its expected time
 	ended  atomic.Bool // read by the stream goroutine
 
 	full     *lichess.GameFull
@@ -88,6 +85,7 @@ type Session struct {
 	thinkStarted time.Time
 	thinkingPly  int
 	cancelThink  context.CancelFunc
+	slowTimer    *time.Timer
 	submittedPly int
 	postFailures map[int]int
 
@@ -95,16 +93,14 @@ type Session struct {
 	pendingChat []string
 	finished    bool
 
-	llmDownMoves       int // consecutive moves the LLM could not be reached for
-	autopilotAnnounced bool
+	slowAnnounced bool
 }
 
-// Messages sent when the LLM cannot be reached.
+// Messages sent when the LLM is unreachable or slow.
 const (
 	msgAbortLLMDown  = "Sorry, my AI brain is unreachable right now, so I'm aborting this game. Please try again later!"
-	msgAutopilot     = "Sorry, my AI brain is unreachable right now: I'm playing random moves until it comes back."
-	msgResignLLMDown = "My AI brain is still unreachable, so I resign rather than play random moves. Sorry, and well played!"
-	msgTooSlow       = "Sorry, my AI brain is too slow for this time control: when it runs out of time, my move is played automatically (at random)."
+	msgResignLLMDown = "My AI brain has been unreachable for a while, so I resign rather than play random moves. Sorry, and well played!"
+	msgTooSlow       = "Sorry, my AI brain is slow: I always wait for its answer, even if it costs me time on the clock. Thanks for your patience!"
 )
 
 // NewSession prepares a session for a game.
@@ -116,6 +112,7 @@ func NewSession(id, me string, api API, brain *Brain, cfg config.Bot, openings c
 		moves:        make(chan moveResult, 1),
 		chats:        make(chan chatResult, 1),
 		retry:        make(chan struct{}, 1),
+		slow:         make(chan int, 1),
 		thinkingPly:  -1,
 		submittedPly: -1,
 		postFailures: map[int]int{},
@@ -174,6 +171,8 @@ func (s *Session) Run(ctx context.Context) {
 			s.handleChat(ctx, r)
 		case <-s.retry:
 			s.maybeThink(ctx)
+		case seq := <-s.slow:
+			s.onSlow(ctx, seq)
 		}
 		if s.finished {
 			s.finish(ctx)
@@ -301,7 +300,8 @@ func (s *Session) book() board.BookStatus {
 }
 
 // maybeThink starts an LLM move request when it is our turn and no request
-// is running or was already sent for this ply.
+// is running or was already sent for this ply. The request has no deadline:
+// the bot waits for the LLM, whatever the clock says.
 func (s *Session) maybeThink(ctx context.Context) {
 	if s.finished || s.pos == nil || s.pos.Turn() != s.color {
 		return
@@ -312,12 +312,18 @@ func (s *Session) maybeThink(ctx context.Context) {
 	}
 	s.stopThinking()
 	snap := s.snapshot()
-	budget := thinkBudget(snap, time.Duration(s.cfg.MaxThinkSeconds)*time.Second)
-	tctx, cancel := context.WithTimeout(ctx, budget)
+	expected := expectedThinkTime(snap, time.Duration(s.cfg.MaxThinkSeconds)*time.Second)
+	tctx, cancel := context.WithCancel(ctx)
 	s.thinkSeq++
 	seq := s.thinkSeq
 	s.thinkingPly, s.cancelThink, s.thinkStarted = ply, cancel, time.Now()
-	s.log.Info("thinking", "ply", ply, "budget", budget.String())
+	s.slowTimer = time.AfterFunc(expected, func() {
+		select {
+		case s.slow <- seq:
+		default:
+		}
+	})
+	s.log.Info("thinking", "ply", ply, "expected", expected.String())
 	go func() {
 		d := s.brain.DecideMove(tctx, snap)
 		select {
@@ -331,16 +337,16 @@ func (s *Session) stopThinking() {
 	if s.cancelThink != nil {
 		s.cancelThink()
 	}
-	s.cancelThink, s.thinkingPly = nil, -1
+	if s.slowTimer != nil {
+		s.slowTimer.Stop()
+	}
+	s.cancelThink, s.slowTimer, s.thinkingPly = nil, nil, -1
 }
 
-// thinkBudget gives the LLM about 1/25 of the remaining time plus most of the
-// increment, capped by max (and by firstMoveBudget for each side's first
-// move).
-func thinkBudget(s Snapshot, max time.Duration) time.Duration {
-	if s.Pos != nil && s.Pos.Ply() < 2 && max > firstMoveBudget {
-		max = firstMoveBudget
-	}
+// expectedThinkTime is the time the LLM should ideally take for a move:
+// about 1/25 of the remaining time plus most of the increment, capped by max.
+// The bot still waits past it, but tells the opponent that it is slow.
+func expectedThinkTime(s Snapshot, max time.Duration) time.Duration {
 	if !s.HasClock {
 		return max
 	}
@@ -354,6 +360,18 @@ func thinkBudget(s Snapshot, max time.Duration) time.Duration {
 	return b
 }
 
+// onSlow tells the opponent, once per game, that the LLM takes longer than
+// expected and that the bot waits for it.
+func (s *Session) onSlow(ctx context.Context, seq int) {
+	if seq != s.thinkSeq || s.cancelThink == nil || s.slowAnnounced || s.finished {
+		return
+	}
+	s.slowAnnounced = true
+	s.log.Info("llm slower than expected, still waiting", "ply", s.thinkingPly,
+		"waited_s", time.Since(s.thinkStarted).Round(100*time.Millisecond).Seconds())
+	s.say(ctx, msgTooSlow)
+}
+
 func (s *Session) handleMove(ctx context.Context, r moveResult) {
 	if r.seq != s.thinkSeq || s.cancelThink == nil {
 		return // stale result
@@ -363,7 +381,8 @@ func (s *Session) handleMove(ctx context.Context, r moveResult) {
 		return
 	}
 	d := r.decision
-	if d.LLMDown && s.handleLLMDown(ctx) {
+	if d.LLMDown {
+		s.giveUp(ctx)
 		return
 	}
 	if d.Resign {
@@ -392,63 +411,32 @@ func (s *Session) handleMove(ctx context.Context, r moveResult) {
 		return
 	}
 	s.submittedPly = r.ply
-	if !d.LLMDown {
-		s.llmDownMoves = 0
-	}
-	s.log.Info("move played", "ply", r.ply, "move", uci, "san", san, "fallback", d.Fallback, "timed_out", d.TimedOut,
-		"offer_draw", d.OfferDraw, "think_s", time.Since(s.thinkStarted).Round(100*time.Millisecond).Seconds())
-	if d.Fallback {
-		// Tell the LLM, so that it does not later explain a move it never chose.
-		s.addEntry("note", fmt.Sprintf("your move %s was played automatically by the program because %s: it was not your choice", san, fallbackReason(d)))
-	}
-	if d.TimedOut && !s.autopilotAnnounced {
-		s.autopilotAnnounced = true
-		s.say(ctx, msgTooSlow)
-	}
+	s.log.Info("move played", "ply", r.ply, "move", uci, "san", san, "offer_draw", d.OfferDraw,
+		"think_s", time.Since(s.thinkStarted).Round(100*time.Millisecond).Seconds())
 	if d.Chat != "" {
 		s.say(ctx, d.Chat)
 	}
 }
 
-func fallbackReason(d Decision) string {
-	switch {
-	case d.LLMDown:
-		return "you could not be reached"
-	case d.TimedOut:
-		return "you did not answer in time"
-	default:
-		return "your answers were not legal moves"
-	}
-}
-
-// handleLLMDown reacts to a move decided without the LLM because it could
-// not be reached. It returns true when the game was aborted or resigned
-// instead of playing the fallback move.
-func (s *Session) handleLLMDown(ctx context.Context) bool {
-	s.llmDownMoves++
-	if s.pos.Ply() < 2 { // Lichess still allows aborting
+// giveUp ends the game because the LLM stayed unreachable: the bot never
+// plays a move the LLM did not choose. It aborts while Lichess allows it,
+// and resigns otherwise.
+func (s *Session) giveUp(ctx context.Context) {
+	if s.pos.Ply() < 2 {
 		s.log.Warn("llm unreachable at the start of the game, aborting")
 		s.say(ctx, msgAbortLLMDown)
-		if err := s.api.Abort(ctx, s.id); err != nil {
-			s.log.Error("abort failed, playing the fallback move", "err", err)
-			return false
+		err := s.api.Abort(ctx, s.id)
+		if err == nil {
+			return
 		}
-		return true
-	}
-	if s.llmDownMoves >= maxLLMDownMoves {
-		s.log.Warn("llm unreachable for too long, resigning", "moves", s.llmDownMoves)
+		s.log.Error("abort failed, resigning", "err", err)
+	} else {
+		s.log.Warn("llm unreachable for too long, resigning")
 		s.say(ctx, msgResignLLMDown)
-		if err := s.api.Resign(ctx, s.id); err != nil {
-			s.log.Error("resign failed, playing the fallback move", "err", err)
-			return false
-		}
-		return true
 	}
-	if !s.autopilotAnnounced {
-		s.autopilotAnnounced = true
-		s.say(ctx, msgAutopilot)
+	if err := s.api.Resign(ctx, s.id); err != nil {
+		s.log.Error("resign failed", "err", err)
 	}
-	return false
 }
 
 func (s *Session) scheduleRetry() {

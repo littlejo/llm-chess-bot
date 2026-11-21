@@ -54,7 +54,7 @@ type Challenges struct {
 type Bot struct {
 	MaxGames        int    `json:"max_games"`         // games played at the same time
 	Persona         string `json:"persona"`           // personality given to the LLM
-	MaxThinkSeconds int    `json:"max_think_seconds"` // max time per LLM move request
+	MaxThinkSeconds int    `json:"max_think_seconds"` // expected time per move; the bot waits longer but says it is slow
 	ChatMemory      int    `json:"chat_memory"`       // transcript entries kept in prompts
 	MoveRetries     int    `json:"move_retries"`      // LLM retries after an illegal move
 	Greet           bool   `json:"greet"`             // greet and announce the opening

@@ -131,7 +131,6 @@ type fakeLLM struct {
 	opening  string
 	farewell string
 	down     bool // every request fails, as when the gateway is unreachable
-	slow     bool // move requests never answer before their deadline
 }
 
 func (f *fakeLLM) Complete(ctx context.Context, msgs []llm.Message) (string, error) {
@@ -139,14 +138,10 @@ func (f *fakeLLM) Complete(ctx context.Context, msgs []llm.Message) (string, err
 	last := msgs[len(msgs)-1].Content
 	f.mu.Lock()
 	f.prompts = append(f.prompts, last)
-	down, slow := f.down, f.slow
+	down := f.down
 	f.mu.Unlock()
 	if down {
 		return "", errors.New("connection error")
-	}
-	if slow && strings.Contains(prompt, "It is your turn") {
-		<-ctx.Done()
-		return "", ctx.Err()
 	}
 	switch {
 	case strings.Contains(prompt, "pong"):

@@ -9,9 +9,10 @@ program itself makes sure that no illegal move is ever sent.
 - It plays through the Lichess Bot API, follows games by streaming and
   reconnects on its own.
 - The LLM picks its moves in UCI format and the chess library validates them.
-  After an illegal move, the LLM is asked again with the error. If it keeps
-  failing, the bot plays a fallback move: the book move, or else a random
-  legal move.
+  After an illegal move, the LLM is asked again with the error, until it gives
+  a legal one. **Every move comes from the LLM**: the program never plays a
+  move by itself, and it waits for the LLM's answer even if that costs time on
+  the clock.
 - The player chat is followed. Messages are classified as "conversation" or
   "game", and the context is kept for the whole game. **A chat message never
   makes the bot play a move.**
@@ -125,7 +126,7 @@ the environment only.
 | | `allow_bots` | `false` | Challenges from other bots |
 | `bot` | `max_games` | `1` | Games played at the same time |
 | | `persona` | friendly and talkative | Personality given to the LLM |
-| | `max_think_seconds` | `60` | Maximum time per move (also bounded by the clock) |
+| | `max_think_seconds` | `60` | Expected thinking time per move, also bounded by the clock (about 1/25 of the remaining time). The bot always waits for the LLM; past this time, it tells the opponent once that it is slow |
 | | `chat_memory` | `40` | Chat transcript entries included in prompts |
 | | `move_retries` | `2` | LLM retries after an illegal move |
 | | `greet` | `true` | Greet, announce the opening and say goodbye |
@@ -184,12 +185,14 @@ internal/bot/        challenges, game sessions, prompts, decisions
   Game requests ("play e5", "draw?") get a polite answer, but nothing is ever
   executed from the chat. Accepting a draw requires an official Lichess offer,
   and the LLM decides when it makes its move.
+- The bot waits for the LLM's move as long as it takes, so a slow LLM can
+  lose on time. Choose time controls with an increment at least as long as
+  the LLM's usual answer time.
 - If the LLM cannot be reached:
   - at startup, the bot refuses to start;
-  - before both sides have moved, it aborts the game;
-  - later in the game, it says once in the chat that it is on autopilot,
-    plays fallback moves to avoid losing on time, and resigns after 3
-    consecutive moves without the LLM;
+  - during a game, it retries every 5 seconds; after 2 minutes without an
+    answer, it aborts the game if both sides have not moved yet, and resigns
+    otherwise;
   - for 2 minutes after a failure, it declines new challenges (`later`).
 - A watchdog monitors the streams: after 30 s without data or keep-alive, the
   bot reconnects with exponential backoff. After an HTTP 429, it waits one
@@ -212,13 +215,14 @@ The tests cover:
 - sessions, with fake Lichess and LLM:
   - one move per turn;
   - chat never triggers a move;
-  - an illegal move is retried, then a fallback move is played;
+  - an illegal move is retried until the LLM gives a legal one;
+  - a slow LLM is waited for, and the opponent is told once;
   - leaving the opening line is announced;
   - a draw offer is accepted;
   - the game ends while the LLM is thinking;
   - a move is sent again after a network error;
-  - an unreachable LLM aborts the game, then later triggers the autopilot
-    message and a resignation.
+  - an unreachable LLM is retried, then aborts or resigns the game, without
+    ever playing a move by itself.
 
 An integration test plays a full game over real HTTP against fake Lichess and
 LiteLLM servers.

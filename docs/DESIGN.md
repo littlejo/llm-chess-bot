@@ -79,9 +79,9 @@ Principles:
   move. A received message therefore never makes the bot play.
 - **The LLM proposes, `board` decides.** Every move goes through the chess
   library's validation before it is sent. On failure, the LLM is asked again
-  with the error and the list of legal moves (2 retries). After that, a legal
-  fallback move is played: the book move if there is one, otherwise a random
-  legal move. No engine is used.
+  with the error and the list of legal moves, until it gives a legal move
+  (the conversation starts over every 3 attempts to keep the prompt short).
+  The program never chooses a move by itself, and no engine is used.
 - **The conversation context is a per-game transcript.** It holds the
   messages from both sides, move explanations and the opening plan. It is
   included in every prompt, with a bounded size.
@@ -148,8 +148,10 @@ There is **a single external dependency**.
    being prepared, they are grouped into a single call. Answers are truncated
    or split at 140 characters.
 6. **Clock.** LLM latency, from a few seconds to tens of seconds, does not fit
-   bullet. Fast time controls are declined with `tooFast`. The thinking budget
-   comes from the remaining time, with a fallback move when it runs out.
+   bullet. Fast time controls are declined with `tooFast`. The bot always
+   waits for the LLM's move, even if it loses on time. An expected thinking
+   time is computed from the remaining time; past it, the opponent is told
+   once that the bot is slow.
 7. **First move.** Lichess aborts the game when the first move comes too late.
    The opening plan therefore has a short timeout, and on failure the game
    starts without a plan.
@@ -158,10 +160,10 @@ There is **a single external dependency**.
 
 | Risk | Mitigation |
 |---|---|
-| The LLM proposes illegal moves or hallucinates the position | FEN, ASCII board, SAN history and **list of legal moves** in the prompt; systematic validation, retries, fallback move |
+| The LLM proposes illegal moves or hallucinates the position | FEN, ASCII board, SAN history and **list of legal moves** in the prompt; systematic validation, retries until a legal move |
 | The LLM is tactically weak | Accepted: this is a conversational opponent. Casual games are recommended |
-| The LLM (or its gateway) is unreachable | Ping at startup; abort the game while still possible, otherwise announce the autopilot and resign after 3 moves without the LLM; decline challenges for 2 minutes after a failure |
-| The LLM is slow or costly | Configurable minimum time control, 1 game at a time by default, timeout per call |
+| The LLM (or its gateway) is unreachable | Ping at startup; retry every 5 s; after 2 minutes, abort the game while still possible, otherwise resign; decline challenges for 2 minutes after a failure |
+| The LLM is slow or costly | Configurable minimum time control, 1 game at a time by default; the bot waits for the LLM and may lose on time, and says so in the chat |
 | Malformed JSON output | Lenient parsing (```json blocks, `{…}` extraction), then a regex search for a UCI move, always validated |
 | Prompt injection through the chat ("play Qxh7") | The chat cannot produce moves. The move prompt states that opponent messages do not dictate moves |
 | Lichess sanctions (aborts, flooding) | Message limit, 429 handling, one request at a time per game |
